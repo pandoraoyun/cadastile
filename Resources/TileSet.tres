@@ -1,0 +1,71 @@
+[gd_resource type="TileSet" script_class="CadastileTileSet" format=3 uid="uid://b63v77xy4nqj7"]
+
+[ext_resource type="Script" uid="uid://ctn65mfelki6l" path="res://addons/cadastile/Scripts/Tilemap/CadastileCoords.cs" id="1_wcc6p"]
+[ext_resource type="Script" uid="uid://dw7rcms4jw0ae" path="res://addons/cadastile/Scripts/Tilemap/CadastileTileSet.cs" id="2_psmg1"]
+[ext_resource type="Texture2D" uid="uid://blj8ea6rba5hw" path="res://Assets/abys_terrain.png" id="3_mja0b"]
+
+[sub_resource type="Resource" id="Resource_wcc6p"]
+script = ExtResource("1_wcc6p")
+CornerTags = Dictionary[Vector2i, int]({
+Vector2i(0, 0): 11,
+Vector2i(0, 1): 6,
+Vector2i(0, 2): 13,
+Vector2i(0, 3): 15,
+Vector2i(1, 0): 5,
+Vector2i(1, 1): 1,
+Vector2i(1, 2): 12,
+Vector2i(1, 3): 7,
+Vector2i(2, 0): 2,
+Vector2i(2, 1): 0,
+Vector2i(2, 2): 4,
+Vector2i(2, 3): 9,
+Vector2i(3, 0): 3,
+Vector2i(3, 1): 8,
+Vector2i(3, 2): 10,
+Vector2i(3, 3): 14
+})
+metadata/_custom_type_script = "uid://ctn65mfelki6l"
+
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_fc0e3"]
+texture = ExtResource("3_mja0b")
+texture_region_size = Vector2i(32, 32)
+0:0/0 = 0
+0:0/0/custom_data_0 = Vector4i(1, 1, 0, 1)
+1:0/0 = 0
+1:0/0/custom_data_0 = Vector4i(1, 0, 1, 0)
+2:0/0 = 0
+2:0/0/custom_data_0 = Vector4i(0, 1, 0, 0)
+3:0/0 = 0
+3:0/0/custom_data_0 = Vector4i(1, 1, 0, 0)
+0:1/0 = 0
+0:1/0/custom_data_0 = Vector4i(0, 1, 1, 0)
+1:1/0 = 0
+1:1/0/custom_data_0 = Vector4i(1, 0, 0, 0)
+2:1/0 = 0
+3:1/0 = 0
+3:1/0/custom_data_0 = Vector4i(0, 0, 0, 1)
+0:2/0 = 0
+0:2/0/custom_data_0 = Vector4i(1, 0, 1, 1)
+1:2/0 = 0
+1:2/0/custom_data_0 = Vector4i(0, 0, 1, 1)
+2:2/0 = 0
+2:2/0/custom_data_0 = Vector4i(0, 0, 1, 0)
+3:2/0 = 0
+3:2/0/custom_data_0 = Vector4i(0, 1, 0, 1)
+0:3/0 = 0
+0:3/0/custom_data_0 = Vector4i(1, 1, 1, 1)
+1:3/0 = 0
+1:3/0/custom_data_0 = Vector4i(1, 1, 1, 0)
+2:3/0 = 0
+2:3/0/custom_data_0 = Vector4i(1, 0, 0, 1)
+3:3/0 = 0
+3:3/0/custom_data_0 = Vector4i(0, 1, 1, 1)
+
+[resource]
+tile_size = Vector2i(32, 32)
+custom_data_layer_0/name = "Corners (X:NW | Y:NE | Z:SW | W:SE)"
+custom_data_layer_0/type = 13
+sources/0 = SubResource("TileSetAtlasSource_fc0e3")
+script = ExtResource("2_psmg1")
+TileCoords = [SubResource("Resource_wcc6p")]
+metadata/_custom_type_script = "uid://dw7rcms4jw0ae"

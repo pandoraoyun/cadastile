@@ -1,0 +1,10 @@
+# Normalize line endings for all files that Git considers text files.
+* text=auto eol=lf
+
+# Only include the CadasTile addon folder when downloading from the Asset Library.
+# Other addons/dependencies the user may have installed locally are excluded —
+# users should install those themselves.
+/**                       export-ignore
+/addons                   !export-ignore
+/addons/cadastile         !export-ignore
+/addons/cadastile/**      !export-ignore
