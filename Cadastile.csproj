@@ -5,6 +5,7 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="addons\cadastile\LICENSE" />
     <Content Include="addons\cadastile\plugin.cfg" />
   </ItemGroup>
 </Project>
