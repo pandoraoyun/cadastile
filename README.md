@@ -63,8 +63,8 @@ one layer**, and a fully **reusable** mask→tile mapping (see [Why data-driven]
 ![Creating a CadasTile layer](Assets/create_layer.gif)
 
 **2. Create the tile set.** FileSystem dock → right-click → *Create New → Resource →
-`CadastileTileSet`* → save as `.tres` (create it here, not via the inspector's *New* button,
-which always makes a plain `TileSet`). Drag the `.tres` onto the layer's TileSet slot.
+`CadastileTileSet`* → save as `.tres`, or make one right on the layer's TileSet slot in the
+inspector (and save it if you want to reuse it).
 
 ![Creating a CadastileTileSet](Assets/create_tileset.gif)
 
