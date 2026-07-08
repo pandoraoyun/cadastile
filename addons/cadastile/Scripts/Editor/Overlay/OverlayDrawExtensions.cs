@@ -39,5 +39,26 @@ internal static class OverlayDrawExtensions
         var (a, b, c, d) = Corners(xform, topLeft, size);
         overlay.DrawColoredPolygon(new[] { a, b, c, d }, color);
     }
+
+    /// <summary>
+    /// Draws a texture region (atlas pixels) into a layer-local cell rectangle (mapped to screen via
+    /// <paramref name="xform"/>), tinted by <paramref name="modulate"/>. Used for the ghost tile preview.
+    /// </summary>
+    public static void DrawTilePreview(this Control overlay, Transform2D xform, Vector2 topLeft, Vector2 size,
+                                       Texture2D texture, Rect2 region, Color modulate)
+    {
+        var (a, b, c, d) = Corners(xform, topLeft, size);
+        Vector2 tex = texture.GetSize();
+        Vector2 p = region.Position;
+        Vector2 s = region.Size;
+        Vector2[] uvs =
+        {
+            p / tex,
+            new Vector2(p.X + s.X, p.Y) / tex,
+            (p + s) / tex,
+            new Vector2(p.X, p.Y + s.Y) / tex,
+        };
+        overlay.DrawColoredPolygon(new[] { a, b, c, d }, modulate, uvs, texture);
+    }
 }
 #endif

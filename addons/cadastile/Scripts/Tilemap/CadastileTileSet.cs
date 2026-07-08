@@ -1,6 +1,5 @@
 using Godot;
-using System;
-using System.Linq;
+using Godot.Collections;
 
 namespace Cadastile.Tilemap;
 
@@ -8,23 +7,24 @@ namespace Cadastile.Tilemap;
 /// Addresses dual-grid tiles not by their atlas position but by the corner-fill combination
 /// (<see cref="CadasTileCorner"/>) they represent. Every atlas tile carries a single Vector4I
 /// custom-data layer (X:NW Y:NE Z:SW W:SE); the corner data is stored per source in a
-/// <see cref="CadastileCoords"/> resource.
+/// <see cref="CadastileCoords"/> resource, keyed by atlas SOURCE ID (not enumeration order, so adding,
+/// removing or reordering sources can never misalign the mapping).
 ///
 /// Two-way sync (editor-only):
 ///  - Paint -> resource: TileSet.Changed -> HandleChanged reads the custom-data into CadastileCoords.
 ///  - Resource -> paint: when CadastileCoords changes (inspector/load), it is written back to custom-data.
-/// Both directions are guarded by <c>_syncing</c> to break the feedback loop.
+/// A reconcile step keeps one coords resource per current source. All guarded by <c>_syncing</c>.
 /// </summary>
 [Tool]
 [GlobalClass]
 public partial class CadastileTileSet : TileSet
 {
-    /// <summary>Corner tags per source. Index = source enumeration order (GetSourceId(i)).</summary>
-    private CadastileCoords[] _tileCoords = Array.Empty<CadastileCoords>();
+    /// <summary>Corner tags keyed by atlas source id.</summary>
+    private Dictionary<int, CadastileCoords> _tileCoords = [];
 
-    /// <summary>Per-source corner-tag resources, positionally matched to the atlas sources.</summary>
+    /// <summary>Per-source corner-tag resources, keyed by source id. Auto-synced with the atlas sources.</summary>
     [Export]
-    public CadastileCoords[] TileCoords
+    public Dictionary<int, CadastileCoords> TileCoords
     {
         get => _tileCoords;
         set
@@ -32,7 +32,7 @@ public partial class CadastileTileSet : TileSet
             #if TOOLS
             UnsubscribeCoords(_tileCoords);
             #endif
-            _tileCoords = value ?? Array.Empty<CadastileCoords>();
+            _tileCoords = value ?? [];
             #if TOOLS
             SubscribeCoords(_tileCoords);
             // Only reflect immediately once init has finished (runtime/inspector reassignment).
@@ -46,22 +46,30 @@ public partial class CadastileTileSet : TileSet
     [Export] public byte CornerCustomDataIndex; // unused for now; kept in case we want to cache the layer index.
 
     /// <summary>
-    /// Mask -> atlas tile (reverse direction). CornerTags stores coord -> mask; this scans the
-    /// inverse and returns the first matching tile. Cache-free linear scan for small n (~16/source);
-    /// a runtime hot path may need a cache. Returns null if not found.
+    /// Mask -> atlas tile (reverse direction). If <paramref name="sourceId"/> is >= 0 the search is
+    /// scoped to that single source; if it is < 0 the first match across ALL sources (in enumeration
+    /// order) is returned (single-source layers that don't track a per-cell source). Cache-free linear
+    /// scan for small n (~16/source). Null if not found (or, when scoped, if that source lacks the mask).
     /// </summary>
-    public CadastileRef? Resolve(CadasTileCorner mask)
+    public CadastileRef? Resolve(int sourceId, CadasTileCorner mask)
     {
-        foreach ((CadastileCoords coords, int sourceId) in
-                 _tileCoords.Zip(this.GetAtlasSources(), (c, s) => (c, s.sourceId)))
-        {
-            if (coords is null)
-                continue;
+        if (sourceId >= 0)
+            return ResolveIn(sourceId, mask);
 
-            foreach (var kv in coords.CornerTags)
-                if (kv.Value == mask)
-                    return new CadastileRef(sourceId, kv.Key);
-        }
+        foreach ((int sid, TileSetAtlasSource _) in this.GetAtlasSources())
+            if (ResolveIn(sid, mask) is CadastileRef r)
+                return r;
+        return null;
+    }
+
+    private CadastileRef? ResolveIn(int sourceId, CadasTileCorner mask)
+    {
+        if (!_tileCoords.TryGetValue(sourceId, out CadastileCoords coords) || coords is null)
+            return null;
+
+        foreach (var kv in coords.CornerTags)
+            if (kv.Value == mask)
+                return new CadastileRef(sourceId, kv.Key);
         return null;
     }
 
@@ -71,13 +79,9 @@ public partial class CadastileTileSet : TileSet
     /// </summary>
     public bool TryGetMask(int sourceId, Vector2I atlasCoords, out CadasTileCorner mask)
     {
-        foreach ((CadastileCoords coords, int sid) in
-                 _tileCoords.Zip(this.GetAtlasSources(), (c, s) => (c, s.sourceId)))
-        {
-            if (coords is null || sid != sourceId)
-                continue;
+        if (_tileCoords.TryGetValue(sourceId, out CadastileCoords coords) && coords is not null)
             return coords.TryGetCorner(atlasCoords, out mask);
-        }
+
         mask = CadasTileCorner.None;
         return false;
     }
@@ -87,10 +91,9 @@ public partial class CadastileTileSet : TileSet
     public CadastileTileSet()
     {
         Changed += HandleChanged;
-        // Wait until load/deserialize is done, then write resource -> custom-data and start listening.
+        // Wait until load/deserialize is done, then reconcile + write resource -> custom-data.
         Callable.From(DeferredInit).CallDeferred();
     }
-
     #endif
 
 
@@ -98,39 +101,80 @@ public partial class CadastileTileSet : TileSet
 
     private const string CustomDataLayerName = "Corners (X:NW | Y:NE | Z:SW | W:SE)";
 
-    // Prevents the two sync directions from triggering each other (reentrancy / loop guard).
+    // Prevents the two sync directions (and reconcile) from triggering each other.
     private bool _syncing;
 
     // Silences HandleChanged until load/deserialize is complete (wipe protection).
     private bool _ready;
 
-    // Deferred: runs once load finishes. First resource -> custom-data (resource is the source),
+    // Deferred: runs once load finishes. Reconcile the per-source boxes, then resource -> custom-data,
     // then _ready = true -> from here on the paint -> resource direction is open.
     private void DeferredInit()
     {
-        WriteBackFromResources();
-        _ready = true;
-    }
-
-    private void SubscribeCoords(CadastileCoords[] arr)
-    {
-        foreach (CadastileCoords c in arr)
+        _ready = true; // open the paint->resource direction first, so a hiccup below can't disable it
+        _syncing = true;
+        try
         {
-            if (c is null)
-                continue;
-            // idempotent: unsubscribe first, then subscribe -> always exactly one subscription
-            c.TileCornerChangedFromInspector -= WriteBackFromResources;
-            c.TileCornerChangedFromInspector += WriteBackFromResources;
+            ReconcileSources();
+            ForEachTaggedTile(PushResourceToTile);
+        }
+        finally
+        {
+            _syncing = false;
         }
     }
 
-    private void UnsubscribeCoords(CadastileCoords[] arr)
+    // Keeps exactly one CadastileCoords per current atlas source: creates a box for a new source (so it
+    // shows up in the inspector) and drops the entry of a removed source. Keyed by id, so it survives
+    // reordering. Caller holds the _syncing guard.
+    private void ReconcileSources()
     {
-        foreach (CadastileCoords c in arr)
+        var present = new System.Collections.Generic.HashSet<int>();
+
+        foreach ((int sourceId, TileSetAtlasSource _) in this.GetAtlasSources())
         {
-            if (c is null)
+            present.Add(sourceId);
+            if (_tileCoords.TryGetValue(sourceId, out CadastileCoords existing) && existing is not null)
                 continue;
-            c.TileCornerChangedFromInspector -= WriteBackFromResources;
+
+            var coords = new CadastileCoords();
+            coords.TileCornerChangedFromInspector += WriteBackFromResources;
+            _tileCoords[sourceId] = coords;
+        }
+
+        // Collect stale keys (source removed) by enumerating the dict directly (no .Keys), then remove.
+        var stale = new System.Collections.Generic.List<int>();
+        foreach (System.Collections.Generic.KeyValuePair<int, CadastileCoords> kv in _tileCoords)
+            if (!present.Contains(kv.Key))
+                stale.Add(kv.Key);
+
+        foreach (int key in stale)
+        {
+            if (_tileCoords.TryGetValue(key, out CadastileCoords c) && c is not null)
+                c.TileCornerChangedFromInspector -= WriteBackFromResources;
+            _tileCoords.Remove(key);
+        }
+    }
+
+    private void SubscribeCoords(Dictionary<int, CadastileCoords> map)
+    {
+        foreach (System.Collections.Generic.KeyValuePair<int, CadastileCoords> kv in map)
+        {
+            if (kv.Value is null)
+                continue;
+            // idempotent: unsubscribe first, then subscribe -> always exactly one subscription
+            kv.Value.TileCornerChangedFromInspector -= WriteBackFromResources;
+            kv.Value.TileCornerChangedFromInspector += WriteBackFromResources;
+        }
+    }
+
+    private void UnsubscribeCoords(Dictionary<int, CadastileCoords> map)
+    {
+        foreach (System.Collections.Generic.KeyValuePair<int, CadastileCoords> kv in map)
+        {
+            if (kv.Value is null)
+                continue;
+            kv.Value.TileCornerChangedFromInspector -= WriteBackFromResources;
         }
     }
 
@@ -151,8 +195,7 @@ public partial class CadastileTileSet : TileSet
 
     /// <summary>
     /// Ensures the corner custom-data layer, then invokes <paramref name="action"/> for every tile of
-    /// each source's matching CadastileCoords (index = source order). Both sync directions
-    /// (pull/push) share this single iteration.
+    /// each source's CadastileCoords (looked up by source id). Both sync directions share this iteration.
     /// </summary>
     private void ForEachTaggedTile(TileAction action)
     {
@@ -162,12 +205,9 @@ public partial class CadastileTileSet : TileSet
         if (layerId < 0)
             return;
 
-        // _tileCoords[s] <-> source[s] positional match. Zip stops when either ends
-        // (the natural equivalent of the old 's >= all.Length' break).
-        foreach ((CadastileCoords coords, TileSetAtlasSource atlas) in
-                 _tileCoords.Zip(this.GetAtlasSources(), (c, s) => (c, s.atlas)))
+        foreach ((int sourceId, TileSetAtlasSource atlas) in this.GetAtlasSources())
         {
-            if (coords is null)
+            if (!_tileCoords.TryGetValue(sourceId, out CadastileCoords coords) || coords is null)
                 continue;
 
             foreach ((Vector2I coord, TileData data) in atlas.GetTiles())
@@ -184,6 +224,7 @@ public partial class CadastileTileSet : TileSet
         _syncing = true;
         try
         {
+            ReconcileSources();
             ForEachTaggedTile(PullTileToResource);
         }
         finally

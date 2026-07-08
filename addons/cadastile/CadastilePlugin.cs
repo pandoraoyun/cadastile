@@ -26,14 +26,14 @@ public partial class CadastilePlugin : EditorPlugin
 
     public override void _EnterTree()
     {
-        _panel = new CadastilePanel();
+        _panel = new CadastilePanel { Cursor = _cursor };
         #pragma warning disable CS0618 // Type or member is obsolete
         AddControlToBottomPanel(_panel, "CadasTile");
         #pragma warning restore CS0618 // Type or member is obsolete
         // NOTE: no _panel.Hide() -- AddControlToBottomPanel already adds it hidden; a manual Hide()
         // corrupted the bottom panel's visibility state and blocked the full-width layout on show.
-        _panel.ActiveToolChanged += tool => _cursor.ActiveTool = tool;
-        _cursor.ActiveTool = _panel.ActiveTool; // initial sync: the panel picked the default in _Ready
+        // The panel is a view bound to the cursor (Cursor set above) and drives it directly -- no events.
+        _cursor.UndoRedo = GetUndoRedo(); // each paint stroke becomes one editor undo step
 
         _onSelectionChanged = Callable.From(OnSelectionChanged);
         EditorInterface.Singleton.GetSelection().Connect(
@@ -41,6 +41,7 @@ public partial class CadastilePlugin : EditorPlugin
             _onSelectionChanged);
 
         CallDeferred(nameof(InitTabWatcher));
+        CallDeferred(nameof(RebuildSceneLayers));
     }
 
     public override void _ExitTree()
@@ -66,6 +67,23 @@ public partial class CadastilePlugin : EditorPlugin
         }
     }
 
+    // On enable, rebuild every CadastileGridLayer's world grid from its current tilemap, so an
+    // existing or externally-edited scene starts with a fresh, correct world grid.
+    private void RebuildSceneLayers()
+    {
+        Node root = EditorInterface.Singleton.GetEditedSceneRoot();
+        if (root != null)
+            RebuildLayersUnder(root);
+    }
+
+    private static void RebuildLayersUnder(Node node)
+    {
+        if (node is CadastileGridLayer layer)
+            layer.RebuildWorld();
+        foreach (Node child in node.GetChildren())
+            RebuildLayersUnder(child);
+    }
+
     // Find the bottom TabContainer, connect to its signal, sync the initial state.
     private void InitTabWatcher()
     {
@@ -82,29 +100,19 @@ public partial class CadastilePlugin : EditorPlugin
         OnSelectionChanged();
     }
 
-    private void OnBottomTabChanged(long tabIndex) => ForceCadasTileTabIfNative();
-
-    // If the native TileMap tab came to the front and our layer is selected -> switch to CadasTile.
-    private void ForceCadasTileTabIfNative()
-    {
-        if (_activeLayer == null || _tabs == null) return;
-        if (_tabs.IsNativeTileMapActive())
-            MakeBottomPanelItemVisible(_panel);
-    }
+    // Refresh the viewport overlay when the bottom tab changes (our overlay shows only on the CadasTile tab).
+    private void OnBottomTabChanged(long tabIndex) => UpdateOverlays();
 
     private void OnSelectionChanged()
     {
         var nodes = EditorInterface.Singleton.GetSelection().GetSelectedNodes();
         _activeLayer = nodes.Count > 0 && nodes[0] is CadastileGridLayer layer ? layer : null;
 
-        // Feed the panel's source grid with the active layer's TileSet (clear it if none).
-        _panel?.SetTileSet(_activeLayer?.TileSet);
+        // Feed the panel with the active layer (sources come from its TileSet; single-source layers re-skin).
+        _panel?.SetActiveLayer(_activeLayer);
 
         if (_activeLayer != null)
-        {
             MakeBottomPanelItemVisible(_panel);
-            ForceCadasTileTabIfNative();
-        }
 
         _cursor.ResetCursor();
         UpdateOverlays();
@@ -117,6 +125,8 @@ public partial class CadastilePlugin : EditorPlugin
     public override bool _ForwardCanvasGuiInput(InputEvent @event)
     {
         if (_activeLayer == null) return false;
+        // Only paint on our tab; on the native TileMap tab, let its editor handle the input.
+        if (_tabs == null || !_tabs.IsCadasTileActive()) return false;
 
         var (handled, changed) = _cursor.HandleInput(@event, _activeLayer);
         if (changed) UpdateOverlays();

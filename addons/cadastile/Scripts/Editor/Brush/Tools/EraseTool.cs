@@ -1,20 +1,45 @@
 #if TOOLS
+using System.Collections.Generic;
 using Godot;
 
 namespace Cadastile.Editor.Brush.Tools;
 
-/// <summary>Clears the cell entirely (Empty). Right click always uses this; it can also be selected for left click.</summary>
-public sealed class EraseTool : SingleCellActionTool
+/// <summary>
+/// A dedicated eraser that composes the existing interactions: left button = single-cell erase (Draw),
+/// right button = rectangle erase (Rect). It holds a Draw and a Rect instance (both wired to only erase)
+/// and routes the lifecycle to one of them based on the held button. No new interaction logic here.
+/// </summary>
+public sealed class EraseTool : CadastileTool
 {
-    private static readonly Color ErasePreview = new(0.95f, 0.35f, 0.35f, 0.75f);
-    private const float ErasePreviewWidth = 1.4f;
+    private readonly DrawTool _single = new();
+    private readonly RectangleTool _rect = new();
+
+    public EraseTool() : base() // the eraser itself offers no brush choice
+    {
+        var erase = new EraseBrush();
+        _single.PrimaryBrush = _single.SecondaryBrush = erase; // left  -> single-cell erase
+        _rect.PrimaryBrush = _rect.SecondaryBrush = erase;     // right -> rectangle erase
+    }
 
     public override string Name => "Erase";
+    public override string IconName => "Eraser";
 
-    protected override void ApplyToCell(CadastileGridLayer layer, Vector2I cell) => layer.Erase(cell);
+    // Route: right button -> rectangle erase; anything else (left / hover) -> single-cell erase.
+    private CadastileTool Inner(CadastileCursor cursor)
+        => cursor.HeldButton == MouseButton.Right ? _rect : _single;
 
-    // Mark the affected display cell with a faint red outline.
-    protected override void DrawDisplayCell(Control overlay, Transform2D xform, Vector2 topLeft, Vector2 size)
-        => overlay.DrawCellOutline(xform, topLeft, size, ErasePreview, ErasePreviewWidth);
+    public override void OnPress(CadastileGridLayer layer, CadastileCursor cursor)   => Inner(cursor).OnPress(layer, cursor);
+    public override void OnDrag(CadastileGridLayer layer, CadastileCursor cursor)    => Inner(cursor).OnDrag(layer, cursor);
+    public override void OnRelease(CadastileGridLayer layer, CadastileCursor cursor) => Inner(cursor).OnRelease(layer, cursor);
+    public override void OnCancel(CadastileGridLayer layer, CadastileCursor cursor)  => Inner(cursor).OnCancel(layer, cursor);
+
+    public override void Draw(Control overlay, CadastileGridLayer layer, CadastileCursor cursor)
+        => Inner(cursor).Draw(overlay, layer, cursor);
+
+    // Never used -- delegation handles everything -- but required by the base.
+    protected override IEnumerable<Vector2I> CollectCells(CadastileCursor cursor, Vector2I cursorCell)
+    {
+        yield break;
+    }
 }
 #endif

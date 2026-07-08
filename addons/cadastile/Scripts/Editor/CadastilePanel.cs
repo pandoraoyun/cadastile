@@ -1,39 +1,34 @@
 #if TOOLS
-using System;
 using System.Collections.Generic;
 using Godot;
 
 namespace Cadastile.Editor;
 
 /// <summary>
-/// The CadasTile bottom panel. Top: tool selection (radio) plus the selected tool's modes (radio, if
-/// any). Left: the TileSet sources as a thumbnail grid. Right: a tile list (placeholder). Left click
-/// = selected tool, right click = always erase. The panel owns the tool list and renders from it.
+/// The CadasTile bottom panel -- a view bound to the cursor. The tool bar shows every tool; the ACTIVE
+/// tool is wrapped in a bordered group together with its brushes, while the other tools sit as plain
+/// icon buttons pushed along. A brush is bound by clicking it: left = primary (green), right =
+/// secondary (blue). Below the bar: the TileSet sources.
 /// </summary>
 [Tool]
 public partial class CadastilePanel : Control
 {
-    /// <summary>Fired when the active (left-click) tool changes; the plugin binds it to the cursor.</summary>
-    public event Action<CadastileTool> ActiveToolChanged;
+    /// <summary>The model this panel drives; set by the plugin before the panel enters the tree.</summary>
+    public CadastileCursor Cursor { get; set; }
 
-    // The panel owns the tool list and renders the tool bar from it.
-    private readonly List<CadastileTool> _tools = new()
-    {
-        new NoneTool(),
-        new DrawTool(),
-        new EraseTool(),
-    };
+    private static readonly Color PrimaryAccent   = new(0.55f, 1.00f, 0.65f);
+    private static readonly Color SecondaryAccent = new(0.55f, 0.78f, 1.00f);
 
-    private const int DefaultToolIndex = 1; // Draw
-
-    /// <summary>The currently selected (left-click) tool.</summary>
-    public CadastileTool ActiveTool { get; private set; }
-
-    private HBoxContainer _modeRow;
+    private readonly Dictionary<CadastileBrush, Button> _brushButtons = new();
+    private HBoxContainer _toolRow;
+    private Button _bakeButton;
     private GridContainer _sourceGrid;
+    private CadastileGridLayer _layer;
+    private CadastileTileSet _watchedTileSet;
+    private readonly List<int> _sourceIds = new();
 
-    private const int SourceColumns = 4;
-    private static readonly Vector2 ThumbSize = new(72, 72);
+    private const int SourceColumns = 6;
+    private static readonly Vector2 ThumbSize = new(96, 96);
 
     public override void _Ready()
     {
@@ -44,104 +39,257 @@ public partial class CadastilePanel : Control
         root.AddThemeConstantOverride("separation", 6);
         AddChild(root);
 
-        root.AddChild(BuildToolRow());
+        _toolRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _toolRow.AddThemeConstantOverride("separation", 6);
 
-        _modeRow = new HBoxContainer();
-        _modeRow.AddThemeConstantOverride("separation", 8);
-        root.AddChild(_modeRow);
+        var topRow = new HBoxContainer();
+        topRow.AddThemeConstantOverride("separation", 6);
+        topRow.AddChild(_toolRow);
+        topRow.AddChild(BuildBakeButton());
+        root.AddChild(topRow);
 
         root.AddChild(new HSeparator());
         root.AddChild(BuildBody());
 
-        // Select the default tool (this also builds the mode row).
-        SelectTool(_tools[DefaultToolIndex]);
+        RebuildToolRow();
+        Callable.From(FixToolRowHeight).CallDeferred();
     }
 
-    // Top row: tools as radio buttons (ButtonGroup). Selecting one makes it the ActiveTool.
-    private HBoxContainer BuildToolRow()
+    public override void _ExitTree()
     {
-        var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 8);
-        row.AddChild(new Label { Text = "Tool:" });
+        if (_watchedTileSet != null)
+            _watchedTileSet.Changed -= OnTileSetChanged;
+        _watchedTileSet = null;
+    }
 
-        var group = new ButtonGroup();
-        foreach (CadastileTool tool in _tools)
+    // A "Bake" button: rebuilds the world grid from the layer's current tiles, so tiles painted with the
+    // native TileMap editor get adopted. Disabled when no layer is selected.
+    private Button BuildBakeButton()
+    {
+        _bakeButton = new Button
         {
-            var button = new Button
-            {
-                Text = tool.Name,
-                ToggleMode = true,
-                ButtonGroup = group,
-                ButtonPressed = tool == _tools[DefaultToolIndex],
-            };
-            button.Pressed += () => SelectTool(tool);
-            row.AddChild(button);
-        }
-        return row;
+            Text = "Bake",
+            Icon = GetEditorIcon("Reload"),
+            TooltipText = "Rebuild the world grid from the layer's current tiles",
+            Disabled = true,
+        };
+        _bakeButton.Pressed += () => _layer?.RebuildWorld();
+        return _bakeButton;
     }
 
-    // Applies the selected tool: set ActiveTool + fire the event + rebuild the mode row.
-    private void SelectTool(CadastileTool tool)
+    // The tool bar: "Tool:" + every tool. The active tool is grouped (bordered) with its brushes; the
+    // others are plain icon buttons. Rebuilt whenever the active tool changes.
+    private void RebuildToolRow()
     {
-        ActiveTool = tool;
-        ActiveToolChanged?.Invoke(tool);
-        RebuildModeRow(tool);
-    }
-
-    // Shows the selected tool's modes as radio buttons; hides the row if the tool has no modes.
-    private void RebuildModeRow(CadastileTool tool)
-    {
-        foreach (Node child in _modeRow.GetChildren())
-            child.QueueFree();
-
-        _modeRow.Visible = tool.Modes.Length > 0;
-        if (!_modeRow.Visible)
+        if (_toolRow == null)
             return;
 
-        _modeRow.AddChild(new Label { Text = "Mode:" });
+        foreach (Node child in _toolRow.GetChildren())
+            child.QueueFree();
+        _brushButtons.Clear();
+
+        _toolRow.AddChild(new Label { Text = "Tool:" });
 
         var group = new ButtonGroup();
-        for (int i = 0; i < tool.Modes.Length; i++)
+        foreach (CadastileTool tool in Cursor.Tools)
         {
-            int index = i; // closure capture
-            var button = new Button
-            {
-                Text = tool.Modes[i],
-                ToggleMode = true,
-                ButtonGroup = group,
-                ButtonPressed = i == tool.SelectedMode,
-            };
-            button.Pressed += () => tool.SelectedMode = index;
-            _modeRow.AddChild(button);
+            CadastileTool t = tool; // closure capture
+            bool active = t == Cursor.ActiveTool;
+
+            var box = new HBoxContainer();
+            box.AddThemeConstantOverride("separation", 4);
+            box.AddChild(MakeToolButton(t, group));
+            if (active)
+                foreach (CadastileBrush brush in t.Brushes)
+                    box.AddChild(MakeBrushButton(t, brush));
+
+            // Every tool sits in a same-sized box (border visible only for the active one), so the row
+            // height never jumps when switching to a mode-less tool.
+            var panel = new PanelContainer();
+            panel.AddThemeStyleboxOverride("panel", active ? ActiveToolBorder() : PhantomToolBorder());
+            panel.AddChild(box);
+            _toolRow.AddChild(panel);
+
+            if (active && t.Brushes.Count > 0)
+                RefreshBrushButtons(t);
         }
     }
 
-    // Body: left source grid (scroll) | right tile list (placeholder).
-    private HSplitContainer BuildBody()
+    private Button MakeToolButton(CadastileTool tool, ButtonGroup group)
     {
-        var body = new HSplitContainer { SizeFlagsVertical = SizeFlags.ExpandFill };
-
-        var left = new VBoxContainer { CustomMinimumSize = new Vector2(260, 0) };
-        left.AddChild(new Label { Text = "Sources" });
-
-        var scroll = new ScrollContainer { SizeFlagsVertical = SizeFlags.ExpandFill };
-        _sourceGrid = new GridContainer { Columns = SourceColumns, SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _sourceGrid.AddThemeConstantOverride("h_separation", 6);
-        _sourceGrid.AddThemeConstantOverride("v_separation", 6);
-        scroll.AddChild(_sourceGrid);
-        left.AddChild(scroll);
-        body.AddChild(left);
-
-        var right = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        right.AddChild(new Label { Text = "Tiles" });
-        right.AddChild(new Panel { SizeFlagsVertical = SizeFlags.ExpandFill });
-        body.AddChild(right);
-
-        return body;
+        Texture2D icon = GetEditorIcon(tool.IconName);
+        var button = new Button
+        {
+            Text = icon == null ? tool.Name : "",
+            Icon = icon,
+            TooltipText = tool.Name,
+            ToggleMode = true,
+            ButtonGroup = group,
+            ButtonPressed = tool == Cursor.ActiveTool,
+        };
+        button.Pressed += () => SelectTool(tool);
+        return button;
     }
 
-    /// <summary>Takes the active layer's TileSet and fills the source grid with thumbnails. Null clears it.</summary>
-    public void SetTileSet(CadastileTileSet tileSet)
+    private Button MakeBrushButton(CadastileTool tool, CadastileBrush brush)
+    {
+        var button = new Button
+        {
+            Text = brush.Name,
+            TooltipText = $"{brush.Name}  (left = primary, right = secondary)",
+        };
+        button.GuiInput += e => OnBrushButtonInput(e, tool, brush);
+        _brushButtons[brush] = button;
+        return button;
+    }
+
+    // Pins the tool row to a constant height (measured from a text button + the cell margins) so
+    // switching to a mode-less tool -- which shows no brush buttons -- doesn't shrink the row. The
+    // buttons fill this height (Control fills its container vertically by default).
+    private void FixToolRowHeight()
+    {
+        if (_toolRow == null)
+            return;
+
+        var probe = new Button { Text = "Ay" };
+        _toolRow.AddChild(probe);
+        float h = probe.GetCombinedMinimumSize().Y;
+        _toolRow.RemoveChild(probe);
+        probe.Free();
+
+        if (h < 1f)
+            h = 28f * EditorInterface.Singleton.GetEditorScale();
+        _toolRow.CustomMinimumSize = new Vector2(0, h + 10f); // + panel content margins + border
+    }
+
+    private void SelectTool(CadastileTool tool)
+    {
+        Cursor.ActiveTool = tool;
+        Callable.From(RebuildToolRow).CallDeferred(); // relayout once the click is fully handled
+    }
+
+    private void OnBrushButtonInput(InputEvent @event, CadastileTool tool, CadastileBrush brush)
+    {
+        if (@event is not InputEventMouseButton { Pressed: true } mb)
+            return;
+        if (mb.ButtonIndex == MouseButton.Left)
+            tool.PrimaryBrush = brush;
+        else if (mb.ButtonIndex == MouseButton.Right)
+            tool.SecondaryBrush = brush;
+        else
+            return;
+        RefreshBrushButtons(tool);
+    }
+
+    // Tint each brush button by its role for the active tool: primary = green, secondary = blue, else neutral.
+    private void RefreshBrushButtons(CadastileTool tool)
+    {
+        foreach ((CadastileBrush brush, Button button) in _brushButtons)
+        {
+            if (brush == tool.PrimaryBrush)
+                button.Modulate = PrimaryAccent;
+            else if (brush == tool.SecondaryBrush)
+                button.Modulate = SecondaryAccent;
+            else
+                button.Modulate = Colors.White;
+        }
+    }
+
+    // A subtle rounded border box wrapping the active tool + its brushes.
+    private static StyleBoxFlat ActiveToolBorder()
+    {
+        var sb = new StyleBoxFlat
+        {
+            BgColor = new Color(1f, 1f, 1f, 0.04f),
+            BorderColor = new Color(0.55f, 0.60f, 0.66f, 0.85f),
+        };
+        sb.SetBorderWidthAll(1);
+        sb.SetCornerRadiusAll(4);
+        sb.SetContentMarginAll(4);
+        return sb;
+    }
+
+    // Same footprint as ActiveToolBorder but invisible -- keeps every tool cell the same height.
+    private static StyleBoxFlat PhantomToolBorder()
+    {
+        var sb = new StyleBoxFlat { BgColor = Colors.Transparent, BorderColor = Colors.Transparent };
+        sb.SetBorderWidthAll(1);
+        sb.SetCornerRadiusAll(4);
+        sb.SetContentMarginAll(4);
+        return sb;
+    }
+
+    // Looks up a Godot editor icon by name (EditorIcons); null if absent (button falls back to text).
+    private static Texture2D GetEditorIcon(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return null;
+        Theme theme = EditorInterface.Singleton.GetEditorTheme();
+        return theme != null && theme.HasIcon(name, "EditorIcons") ? theme.GetIcon(name, "EditorIcons") : null;
+    }
+
+    // Body: the TileSet sources, full width (no header label).
+    private Control BuildBody()
+    {
+        var scroll = new ScrollContainer
+        {
+            SizeFlagsVertical = SizeFlags.ExpandFill,
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+        _sourceGrid = new GridContainer { Columns = SourceColumns, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _sourceGrid.AddThemeConstantOverride("h_separation", 10);
+        _sourceGrid.AddThemeConstantOverride("v_separation", 10);
+        scroll.AddChild(_sourceGrid);
+        return scroll;
+    }
+
+    /// <summary>
+    /// Binds the panel to the active layer: watches its TileSet for source add/remove and (re)builds the
+    /// selectable source grid. For a single-source layer, selecting a source re-skins the whole layer.
+    /// </summary>
+    public void SetActiveLayer(CadastileGridLayer layer)
+    {
+        _layer = layer;
+        if (_bakeButton != null)
+            _bakeButton.Disabled = layer == null;
+
+        CadastileTileSet tileSet = layer?.TileSet;
+        if (_watchedTileSet != tileSet)
+        {
+            if (_watchedTileSet != null)
+                _watchedTileSet.Changed -= OnTileSetChanged;
+            _watchedTileSet = tileSet;
+            if (_watchedTileSet != null)
+                _watchedTileSet.Changed += OnTileSetChanged;
+        }
+
+        BuildSources();
+    }
+
+    // The watched TileSet changed; rebuild the source grid only when the set of source ids actually
+    // changed (a source added/removed) -- not on every tile edit, which would reset the selection.
+    private void OnTileSetChanged()
+    {
+        var now = new List<int>();
+        if (_watchedTileSet != null)
+            foreach ((int id, TileSetAtlasSource _) in _watchedTileSet.GetAtlasSources())
+                now.Add(id);
+
+        if (now.Count != _sourceIds.Count || !SameIds(now, _sourceIds))
+            BuildSources();
+    }
+
+    private static bool SameIds(List<int> a, List<int> b)
+    {
+        foreach (int x in a)
+            if (!b.Contains(x))
+                return false;
+        return true;
+    }
+
+    // (Re)builds the source grid from the active layer's TileSet, preserving the current selection
+    // (single-source: its ActiveSource; multi: the cursor's active source) when it is still valid.
+    private void BuildSources()
     {
         if (_sourceGrid == null)
             return;
@@ -149,20 +297,91 @@ public partial class CadastilePanel : Control
         foreach (Node child in _sourceGrid.GetChildren())
             child.QueueFree();
 
-        if (tileSet == null)
-            return;
-
-        foreach ((int sourceId, TileSetAtlasSource atlas) in tileSet.GetAtlasSources())
-        {
-            _sourceGrid.AddChild(new TextureRect
+        _sourceIds.Clear();
+        var sources = new List<(int id, TileSetAtlasSource atlas)>();
+        if (_layer?.TileSet is CadastileTileSet tileSet)
+            foreach ((int sourceId, TileSetAtlasSource atlas) in tileSet.GetAtlasSources())
             {
-                Texture = atlas.Texture,
-                CustomMinimumSize = ThumbSize,
-                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
-                TooltipText = atlas.Texture?.ResourcePath ?? $"source {sourceId}",
-            });
+                sources.Add((sourceId, atlas));
+                _sourceIds.Add(sourceId);
+            }
+
+        if (sources.Count == 0)
+        {
+            SelectSource(-1);
+            return;
         }
+
+        int current = _layer is SingleSourceCadastileGridLayer single ? single.ActiveSource : (Cursor?.ActiveSourceId ?? -1);
+        int initial = sources.Exists(s => s.id == current) ? current : sources[0].id;
+
+        var group = new ButtonGroup();
+        foreach ((int id, TileSetAtlasSource atlas) in sources)
+            _sourceGrid.AddChild(MakeSourceCard(id, atlas, group, id == initial));
+
+        SelectSource(initial);
+    }
+
+    // A source card: padded, faintly-tinted panel with a selectable thumbnail + its name (ellipsized).
+    private Control MakeSourceCard(int id, TileSetAtlasSource atlas, ButtonGroup group, bool pressed)
+    {
+        int sid = id; // closure capture
+        var button = new Button
+        {
+            ToggleMode = true,
+            ButtonGroup = group,
+            CustomMinimumSize = ThumbSize,
+            Icon = atlas.Texture,
+            ExpandIcon = true,
+            ButtonPressed = pressed,
+        };
+        button.Pressed += () => SelectSource(sid);
+
+        string name = SourceName(atlas, id);
+        var label = new Label
+        {
+            Text = name,
+            TooltipText = name,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis,
+            CustomMinimumSize = new Vector2(ThumbSize.X, 0),
+        };
+        label.AddThemeFontSizeOverride("font_size", 10);
+
+        var box = new VBoxContainer();
+        box.AddThemeConstantOverride("separation", 4);
+        box.AddChild(button);
+        box.AddChild(label);
+
+        var card = new PanelContainer();
+        card.AddThemeStyleboxOverride("panel", SourceCardStyle());
+        card.AddChild(box);
+        return card;
+    }
+
+    private static string SourceName(TileSetAtlasSource atlas, int id)
+    {
+        string path = atlas.Texture?.ResourcePath;
+        return string.IsNullOrEmpty(path) ? $"source {id}" : System.IO.Path.GetFileNameWithoutExtension(path);
+    }
+
+    // A faint padded card behind each source.
+    private static StyleBoxFlat SourceCardStyle()
+    {
+        var sb = new StyleBoxFlat { BgColor = new Color(1f, 1f, 1f, 0.05f) };
+        sb.SetCornerRadiusAll(4);
+        sb.SetContentMarginAll(6);
+        return sb;
+    }
+
+    // Sets the active paint source: on the cursor (painting/preview) and, for a single-source layer, as
+    // the whole layer's source (which re-skins its existing tiles).
+    private void SelectSource(int sourceId)
+    {
+        if (Cursor != null)
+            Cursor.ActiveSourceId = sourceId;
+        if (_layer is SingleSourceCadastileGridLayer single)
+            single.ActiveSource = sourceId;
     }
 }
 #endif

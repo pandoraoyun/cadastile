@@ -1,13 +1,20 @@
 #if TOOLS
+using System.Collections.Generic;
 using Godot;
 
 namespace Cadastile.Editor.Brush.Tools;
 
-/// <summary>Does nothing -- a safe empty tool that prevents accidental painting while selecting/panning.</summary>
+/// <summary>Does nothing (no brushes, empty selection) -- prevents accidental painting while selecting/panning.</summary>
 public sealed class NoneTool : CadastileTool
 {
-    public override string Name => "None";
+    public NoneTool() : base() { }
 
-    public override void Apply(CadastileGridLayer layer, CadastileCursor cursor) { }
+    public override string Name => "None";
+    public override string IconName => "ToolSelect";
+
+    protected override IEnumerable<Vector2I> CollectCells(CadastileCursor cursor, Vector2I cursorCell)
+    {
+        yield break;
+    }
 }
 #endif

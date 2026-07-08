@@ -1,14 +1,15 @@
 #if TOOLS
+using System.Collections.Generic;
 using Godot;
 
 namespace Cadastile.Editor.Brush;
 
 /// <summary>
-/// Handles viewport input, holds the cursor state, AND draws its own overlay. Left click runs the
-/// selected tool (ActiveTool), right click always runs the EraseTool; the middle button is left
-/// untouched (editor pan). Drawing: a faint/dashed world grid (fading outward from the center) + the
-/// cursor's world cell + the active tool's own render-grid preview. The plugin calls
-/// <see cref="Draw"/> from _ForwardCanvasDrawOverViewport.
+/// Handles viewport input, holds the GLOBAL cursor state (coordinates, active source, held button),
+/// owns the tool list, and draws its own overlay. Both mouse buttons run the active tool; the button
+/// only chooses the brush (left = primary, right = secondary), which the tool holds. Middle = pan.
+/// Pressing the other button mid-drag cancels. The plugin calls <see cref="Draw"/> from
+/// _ForwardCanvasDrawOverViewport.
 /// </summary>
 public sealed class CadastileCursor
 {
@@ -18,8 +19,21 @@ public sealed class CadastileCursor
     /// <summary>Whether the mouse is over a position in the viewport.</summary>
     public bool HasCursor { get; private set; }
 
-    /// <summary>The active tool run by left click (selected from the panel).</summary>
+    /// <summary>The active paint source (selected from the panel). -1 = none / any source.</summary>
+    public int ActiveSourceId { get; set; } = -1;
+
+    /// <summary>The mouse button currently held for a drag (None if nothing held). A tool reads this to
+    /// tell a primary (left) action from a secondary (right) one.</summary>
+    public MouseButton HeldButton => _heldButton;
+
+    /// <summary>The available tools (interactions), owned here; the panel renders the tool bar from them.</summary>
+    public IReadOnlyList<CadastileTool> Tools => _tools;
+
+    /// <summary>The active tool (interaction) run by both buttons.</summary>
     public CadastileTool ActiveTool { get; set; }
+
+    /// <summary>The editor's undo/redo manager (set by the plugin). Each stroke becomes one undo step.</summary>
+    public EditorUndoRedoManager UndoRedo { get; set; }
 
     // --- Overlay settings (could move to EditorSettings later) ---
 
@@ -36,15 +50,20 @@ public sealed class CadastileCursor
     private const float CursorOutlineWidth = 1.6f;
     private const float DashLength         = 4f;
 
-    // Right click always erases; independent of the selected tool.
-    private readonly CadastileTool _rightTool = new EraseTool();
+    private readonly List<CadastileTool> _tools;
 
     // The held button (for drag painting). None = nothing held.
     private MouseButton _heldButton = MouseButton.None;
 
+    public CadastileCursor()
+    {
+        _tools = new List<CadastileTool> { new NoneTool(), new DrawTool(), new LineTool(), new RectangleTool(), new EraseTool() };
+        ActiveTool = _tools[1]; // Draw
+    }
+
     /// <summary>
-    /// Handles viewport input. Left = ActiveTool, right = EraseTool. The middle button is UNTOUCHED
-    /// (pan). Holding and dragging applies continuously.
+    /// Handles viewport input. Left = primary brush, right = secondary brush; both run ActiveTool. The
+    /// middle button is UNTOUCHED (pan). Pressing the other button mid-drag cancels the drag.
     /// </summary>
     /// <returns>(handled, changed): handled = was the input consumed; changed = should the overlay refresh.</returns>
     public (bool handled, bool changed) HandleInput(InputEvent @event, CadastileGridLayer layer)
@@ -59,15 +78,32 @@ public sealed class CadastileCursor
                 {
                     if (mb.Pressed)
                     {
+                        // Another button is already held (a drag is in progress) -> cancel it, no commit.
+                        if (_heldButton != MouseButton.None && mb.ButtonIndex != _heldButton)
+                        {
+                            UpdateCursor(layer);
+                            ActiveTool?.OnCancel(layer, this);
+                            _heldButton = MouseButton.None;
+                            CommitStroke(layer);
+                            return (true, true);
+                        }
+
                         _heldButton = mb.ButtonIndex;
                         UpdateCursor(layer);
-                        ApplyAtCursor(layer);
+                        layer.BeginStroke();
+                        ActiveTool?.OnPress(layer, this);
                         return (true, true); // consumed + refresh
                     }
 
-                    // release: if it's the same button, the drag is done
+                    // release: run the tool's release (e.g. rectangle commits here), then drop the button
                     if (mb.ButtonIndex == _heldButton)
+                    {
+                        UpdateCursor(layer);
+                        ActiveTool?.OnRelease(layer, this);
                         _heldButton = MouseButton.None;
+                        CommitStroke(layer);
+                        return (true, true);
+                    }
                     return (true, false);
                 }
                 break;
@@ -77,10 +113,10 @@ public sealed class CadastileCursor
             {
                 UpdateCursor(layer);
 
-                // apply while dragging with a held button
+                // drag with a held button -> the tool's drag step (continuous paint, or rect preview)
                 if (_heldButton != MouseButton.None)
                 {
-                    ApplyAtCursor(layer);
+                    ActiveTool?.OnDrag(layer, this);
                     return (true, true);
                 }
                 return (false, true); // don't consume, just refresh the overlay
@@ -125,11 +161,16 @@ public sealed class CadastileCursor
         HasCursor = true;
     }
 
-    // Runs the tool for the held button; the tool derives the cell from cursor.MousePosition. Left=ActiveTool, right=erase.
-    private void ApplyAtCursor(CadastileGridLayer layer)
+    // Ends the current stroke and registers it as one editor undo step (do = after state, undo = before).
+    private void CommitStroke(CadastileGridLayer layer)
     {
-        CadastileTool tool = _heldButton == MouseButton.Right ? _rightTool : ActiveTool;
-        tool?.Apply(layer, this);
+        if (!layer.EndStroke(out var before, out var after) || UndoRedo == null)
+            return;
+
+        UndoRedo.CreateAction("CadasTile");
+        UndoRedo.AddDoMethod(layer, "RestoreCells", after);
+        UndoRedo.AddUndoMethod(layer, "RestoreCells", before);
+        UndoRedo.CommitAction(false); // already applied during the stroke; don't re-run the Do
     }
 
     // A thin, dashed world grid whose alpha fades outward from the center. The world grid is offset

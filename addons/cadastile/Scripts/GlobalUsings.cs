@@ -6,5 +6,6 @@ global using Cadastile.Tilemap;
 
 #if TOOLS
 global using Cadastile.Editor.Brush;
+global using Cadastile.Editor.Brush.Tools;
 global using Cadastile.Editor.Overlay;
 #endif
